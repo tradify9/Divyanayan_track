@@ -1,181 +1,170 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-require('dotenv').config();
+const express = require("express");
+const axios = require("axios");
+const cors = require("cors");
+require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-// NimbusPost API configuration
+// NimbusPost API Config
 const NIMBUS_EMAIL = process.env.NIMBUS_EMAIL;
 const NIMBUS_PASSWORD = process.env.NIMBUS_PASSWORD;
-const NIMBUS_BASE_URL = process.env.NIMBUS_BASE_URL || 'https://api.nimbuspost.com/v1';
+const NIMBUS_BASE_URL =
+  process.env.NIMBUS_BASE_URL || "https://api.nimbuspost.com/v1";
 
 // Token cache
 let authToken = null;
 let tokenExpiry = null;
 
-// ✅ Middleware - Allow CORS for ALL ORIGINS
-app.use(cors({
-  origin: '*', // ✅ Allow requests from any domain
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: false, // No cookies/session sharing
-}));
+// ✅ Global Middlewares
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false,
+  })
+);
 app.use(express.json());
 
-// Validate credentials
+// ✅ Validate env vars at startup
 if (!NIMBUS_EMAIL || !NIMBUS_PASSWORD) {
-  console.error('Error: NIMBUS_EMAIL or NIMBUS_PASSWORD is not defined in .env file');
+  console.error(
+    "❌ Missing NIMBUS_EMAIL or NIMBUS_PASSWORD in .env — server cannot start"
+  );
   process.exit(1);
 }
 
-// Function to get or refresh auth token
+// 🔑 Function to get or refresh auth token
 const getAuthToken = async () => {
   if (authToken && tokenExpiry && Date.now() < tokenExpiry) {
-    console.log('Using cached token:', authToken.substring(0, 20) + '...');
+    console.log("✅ Using cached NimbusPost token");
     return authToken;
   }
 
+  console.log("🔑 Requesting new NimbusPost token...");
   try {
-    console.log('Requesting new token from NimbusPost');
-    const loginResponse = await axios.post(`${NIMBUS_BASE_URL}/users/login`, {
-      email: NIMBUS_EMAIL,
-      password: NIMBUS_PASSWORD,
-    }, {
-      headers: { 'Content-Type': 'application/json' },
-    });
+    const loginResponse = await axios.post(
+      `${NIMBUS_BASE_URL}/users/login`,
+      {
+        email: NIMBUS_EMAIL,
+        password: NIMBUS_PASSWORD,
+      },
+      { headers: { "Content-Type": "application/json" } }
+    );
 
-    console.log('Login response:', JSON.stringify(loginResponse.data, null, 2));
-
-    if (!loginResponse.data || !loginResponse.data.status || !loginResponse.data.data) {
-      throw new Error(`Login failed: ${JSON.stringify(loginResponse.data || {})}`);
+    if (!loginResponse.data?.status || !loginResponse.data?.data) {
+      throw new Error(
+        `NimbusPost login failed: ${JSON.stringify(loginResponse.data)}`
+      );
     }
 
     authToken = loginResponse.data.data;
-    tokenExpiry = Date.now() + 60 * 60 * 1000; // 1-hour expiry
-    console.log('New token acquired:', authToken.substring(0, 20) + '...');
+    tokenExpiry = Date.now() + 60 * 60 * 1000; // 1 hour cache
+    console.log("✅ NimbusPost token acquired successfully");
     return authToken;
   } catch (error) {
-    console.error('Login error:', {
+    console.error("❌ NimbusPost Login Error:", {
       message: error.message,
       response: error.response?.data,
       status: error.response?.status,
     });
-    throw new Error('Failed to authenticate with NimbusPost');
+    throw new Error("Failed to authenticate with NimbusPost");
   }
 };
 
-// Track endpoint
-app.get('/api/track/:awb', async (req, res) => {
+// 📦 Track Endpoint
+app.get("/api/track/:awb", async (req, res) => {
   const { awb } = req.params;
 
   if (!awb || awb.length < 5) {
-    console.error(`Invalid AWB number: ${awb}`);
-    return res.status(400).json({ success: false, message: 'Invalid AWB number (too short)' });
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid AWB number (too short)" });
   }
 
   try {
     const token = await getAuthToken();
     const headers = {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
     };
-    const requestUrl = `${NIMBUS_BASE_URL}/shipments/track/${awb}`;
-    console.log(`Sending request to: ${requestUrl}`);
-    console.log('Request headers:', { 'Authorization': 'Bearer ...' + token.slice(-4) });
 
-    const trackResponse = await axios.get(requestUrl, { headers });
+    const trackUrl = `${NIMBUS_BASE_URL}/shipments/track/${awb}`;
+    console.log(`📡 Requesting tracking: ${trackUrl}`);
 
-    console.log('Track response:', JSON.stringify(trackResponse.data, null, 2));
+    const trackResponse = await axios.get(trackUrl, { headers });
 
-    if (trackResponse.data.status && trackResponse.data.data) {
+    if (trackResponse.data?.status && trackResponse.data?.data) {
       const orderId = trackResponse.data.data.order_id;
       let orderData = {};
+
       try {
-        const orderResponse = await axios.get(`${NIMBUS_BASE_URL}/orders/${orderId}`, {
-          headers,
-        });
-        console.log('Order response:', JSON.stringify(orderResponse.data, null, 2));
-        if (orderResponse.data.status && orderResponse.data.data) {
+        const orderResponse = await axios.get(
+          `${NIMBUS_BASE_URL}/orders/${orderId}`,
+          { headers }
+        );
+        if (orderResponse.data?.status && orderResponse.data?.data) {
           orderData = orderResponse.data.data;
         }
       } catch (orderError) {
-        console.error('Order details error:', orderError.response?.data || orderError.message);
+        console.warn("⚠️ Could not fetch order details:", orderError.message);
       }
 
       const fullData = {
         ...trackResponse.data.data,
-        customer_name: orderData.customer_name || 'N/A',
-        customer_address: orderData.customer_address || 'N/A',
-        product_name: orderData.product_name || 'N/A',
+        customer_name: orderData.customer_name || "N/A",
+        customer_address: orderData.customer_address || "N/A",
+        product_name: orderData.product_name || "N/A",
         product_details: orderData.product_details || [],
       };
 
-      res.json({ success: true, data: fullData });
+      return res.json({ success: true, data: fullData });
     } else {
-      console.error('No tracking data in response:', trackResponse.data);
-      res.status(404).json({ success: false, message: 'No tracking data found for this AWB number' });
+      return res.status(404).json({
+        success: false,
+        message: "No tracking data found for this AWB number",
+      });
     }
   } catch (error) {
-    console.error('Tracking API Error:', {
+    console.error("❌ Tracking API Error:", {
       message: error.message,
-      response: error.response?.data,
       status: error.response?.status,
-      awb,
-      headers_sent: { 'Authorization': 'Bearer ...' + (authToken ? authToken.slice(-4) : 'null') },
+      data: error.response?.data,
     });
 
     if (error.response) {
       const { status, data } = error.response;
-      if (status === 400 && data.message?.includes('Missing required request parameters: [Authorization]')) {
-        authToken = null;
-        res.status(400).json({ success: false, message: 'Authorization header missing or invalid. Please check credentials.' });
-      } else if (status === 400) {
-        res.status(400).json({ success: false, message: data.message || 'Bad request: Invalid AWB or parameters' });
-      } else if (status === 401) {
-        authToken = null;
-        try {
-          const newToken = await getAuthToken();
-          const headers = {
-            'Authorization': `Bearer ${newToken}`,
-            'Content-Type': 'application/json',
-          };
-          const retryResponse = await axios.get(requestUrl, { headers });
-          console.log('Retry response:', JSON.stringify(retryResponse.data, null, 2));
-          if (retryResponse.data.status && retryResponse.data.data) {
-            return res.json({ success: true, data: retryResponse.data.data });
-          } else {
-            console.error('No tracking data in retry response:', retryResponse.data);
-            return res.status(404).json({ success: false, message: 'No tracking data found for this AWB number' });
-          }
-        } catch (retryError) {
-          console.error('Retry failed:', retryError.message);
-          res.status(401).json({ success: false, message: 'Authentication failed. Invalid token or credentials.' });
-        }
-      } else if (status === 403) {
-        res.status(403).json({ success: false, message: 'Access forbidden. Invalid token or AWB number.' });
-      } else if (status === 404) {
-        res.status(404).json({ success: false, message: 'AWB number not found.' });
-      } else {
-        res.status(status || 500).json({
-          success: false,
-          message: data.message || 'Failed to fetch tracking information',
-        });
+      if (status === 401) {
+        authToken = null; // Force refresh token
+        return res
+          .status(401)
+          .json({ success: false, message: "Authentication failed. Token reset." });
       }
-    } else {
-      res.status(500).json({ success: false, message: `Internal server error: ${error.message}` });
+      return res.status(status).json({
+        success: false,
+        message: data?.message || "Failed to fetch tracking information",
+      });
     }
+
+    return res
+      .status(500)
+      .json({ success: false, message: `Internal server error: ${error.message}` });
   }
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ success: true, message: 'Backend is running' });
+// 🏥 Health Check
+app.get("/api/health", (req, res) => {
+  res.json({ success: true, message: "Backend is running" });
 });
 
-// Start server
+// 🔗 Root Route for Render
+app.get("/", (req, res) => {
+  res.send("✅ NimbusPost Tracking API Backend is LIVE");
+});
+
+// 🚀 Start Server
 app.listen(port, () => {
-  console.log(`Backend server running on http://localhost:${port}`);
-  console.log(`Health check: http://localhost:${port}/api/health`);
+  console.log(`✅ Server running at http://localhost:${port}`);
+  console.log(`🔍 Health check: http://localhost:${port}/api/health`);
 });
